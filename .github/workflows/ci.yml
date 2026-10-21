@@ -1,0 +1,68 @@
+# Checks for this repo come from https://github.com/buildthehomelab/wow-ci.
+# They pick themselves based on what the repo contains (C++, SQL, Lua/.toc, PHP, shell, Python).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    uses: buildthehomelab/wow-ci/.github/workflows/ci.yml@main
+    permissions:
+      contents: read
+      packages: read
+
+  # The protocol both sides share (hashes must match), the addon against stand-in chat frames,
+  # and the Discord text conversion.
+  bridge-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua 5.1
+        run: sudo apt-get update && sudo apt-get install -y lua5.1
+      - name: Server text and protocol
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Isrc tests/text.cpp -o /tmp/text-test
+          /tmp/text-test
+      - name: Addon protocol and chat window handling
+        run: |
+          lua5.1 tests/protocol.lua
+          lua5.1 tests/ui.lua
+      - name: Discord text conversion
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  # The module's own statements (read from the C++) and the bridge against a real MySQL: schema
+  # install/re-run/uninstall, every order the async workers can run a message and its edits in.
+  sql-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports:
+          - 33061:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r discord-bridge/requirements.txt
+      - name: Module and bridge SQL on MySQL 8.4
+        run: python tests/sql_smoke.py

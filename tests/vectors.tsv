@@ -1,0 +1,21 @@
+# One sender after saying a message at t=0, run by tests/text.cpp (server EditGate) and
+# tests/protocol.lua (addon decoder). The addon only gets what the server let through, and both
+# must end with the same result. Columns (tab-separated): time in ms, op, text, server outcome
+# (pass, refuse, edit, delete), resulting text. {x240} means 240 times x.
+1000	E	fixed	edit	fixed
+1500	E	too fast	refuse	
+3000	S	{a240}	pass	
+3100	F	tail	edit	{a240}tail
+5000	S	{b240}	pass	
+5100	E	short fix	refuse	
+7000	E	short fix	edit	short fix
+9000	F	orphan	refuse	
+11000	S	{c240}	pass	
+22000	F	late	refuse	
+24000	E	{d256}	refuse	
+26000	S	{e240}	pass	
+27500	S	{f240}	pass	
+27600	F	!	edit	{f240}!
+30000	E	two  spaces   here	edit	two spaces here
+32000	D		delete	
+34000	E	after delete	refuse	

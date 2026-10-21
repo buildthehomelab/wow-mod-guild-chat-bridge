@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: Guild Chat Edit
+## Notes: Up in an empty guild chat box edits your last guild message (/edit, /gdelete). Guild members with the addon see the change.
+## Author: buildthehomelab
+## Version: 1.0.0
+## SavedVariablesPerCharacter: GuildChatEditLast
+Protocol.lua
+GuildChatEdit.lua

@@ -1,0 +1,52 @@
+[worldserver]
+
+########################################
+# mod-guild-chat-bridge
+########################################
+#
+#    GuildChatBridge.Enable
+#        Description: Record real players' guild chat (and its edits from the GuildChatEdit
+#                     addon) for the Discord bridge, and show the bridge's Discord messages in
+#                     guild chat. Start the bridge container too (see the README). The checks
+#                     on the addon's edits (mute, one change a second, text, links) run in
+#                     every guild whether this is on or not.
+#        Default:     0 - (Off)
+#                     1 - (On)
+
+GuildChatBridge.Enable = 0
+
+#
+#    GuildChatBridge.Guilds
+#        Description: Comma-separated guild ids (guild.guildid) to relay. Empty relays every
+#                     guild; the bridge then only posts the guilds it has a channel for, and
+#                     the rest is recorded for nothing. Set it to the guilds that have a
+#                     Discord channel.
+#        Example:     "1,4"
+#        Default:     ""
+
+GuildChatBridge.Guilds = ""
+
+#
+#    GuildChatBridge.PollInterval
+#        Description: Milliseconds between checks for new Discord messages. The check is an
+#                     asynchronous query. Lowest 250.
+#        Default:     1000
+
+GuildChatBridge.PollInterval = 1000
+
+#
+#    GuildChatBridge.KeepDays
+#        Description: Recorded guild chat older than this many days is deleted, at startup
+#                     and every hour. 0 keeps it forever.
+#        Default:     30
+
+GuildChatBridge.KeepDays = 30
+
+#
+#    GuildChatBridge.LoginNotice
+#        Description: At login, tell members of a relayed guild that their guild chat is also
+#                     shown in Discord.
+#        Default:     1 - (On)
+#                     0 - (Off)
+
+GuildChatBridge.LoginNotice = 1
