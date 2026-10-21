@@ -18,6 +18,16 @@ Guild chat for AzerothCore (3.3.5a) that you can fix after sending, and that rea
 The addon works on its own; with the module the server judges edits, and with the bridge they
 reach Discord too.
 
+## Requirements
+
+- AzerothCore wotlk (master) with the WotLK 3.3.5a (12340) client, MySQL 8 (or MariaDB).
+- The addon alone needs nothing on the server; with the module the server also judges edits.
+- For Discord: Docker (or any Python 3.11 host that reaches the database), a Discord bot and one
+  text channel per guild you link.
+- Optional: [mod-playerbots](https://github.com/mod-playerbots/mod-playerbots). Bots are never
+  relayed; the module detects them with `WorldSession::IsHeadless()` when the core has it.
+- Optional: DragonUI, whose chat settings let the Up key reach the chat box.
+
 ## The addon
 
 | You do | What happens |
@@ -166,6 +176,21 @@ may show as blanks in the 3.3.5 client. Edits made in Discord are not sent to th
 Players are told at login that their guild's chat goes to Discord (`GuildChatBridge.LoginNotice`);
 recorded chat is kept for `GuildChatBridge.KeepDays` days.
 
+## Troubleshooting
+
+- **Up does nothing.** Arrow keys turn your character instead of moving in the chat box (stock
+  chat settings), or you haven't said anything in guild chat this day. Type `/edit <new text>`.
+- **"there's no recent guild message of yours to change".** In a linked guild the server only
+  knows messages since its last restart, and only from the guild you're in now.
+- **Nothing reaches Discord.** Look at the bridge's start-up log: each `guild N -> #channel`
+  line says whether the bot can see the channel and has its permissions. Check that
+  `GuildChatBridge.Enable = 1` and the guild id is in `GuildChatBridge.Guilds`.
+- **"sync failed" over and over.** The bridge can't reach the database: is it on `ac-network`
+  and is `GCB_DB_PASSWORD` right?
+- **Discord messages don't show in game.** Message Content Intent must be on for the bot, and
+  the worldserver polls only while `GuildChatBridge.Enable = 1`. Messages older than five
+  minutes when the worldserver sees them are skipped.
+
 ## Uninstall
 
 Remove the module folder, stop the bridge, rebuild, then run
@@ -183,6 +208,11 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 `tests/sql_smoke.py` runs the module's SQL (read from the C++) and the bridge against a throwaway
 MySQL 8 server; see the top of the file for the `docker run` line. It drops and recreates its own
 test database.
+
+## Credits
+
+Author: [buildthehomelab](https://github.com/buildthehomelab). Class icons in Discord are
+Blizzard's art as hosted by Wowhead (`GCB_ICON_URL` to change or turn off).
 
 ## License
 
