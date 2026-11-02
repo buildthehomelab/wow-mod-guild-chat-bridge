@@ -17,11 +17,11 @@ GuildChatBridge.Enable = 0
 
 #
 #    GuildChatBridge.Guilds
-#        Description: Comma-separated guild ids (guild.guildid) to relay. Empty relays every
-#                     guild; the bridge then only posts the guilds it has a channel for, and
-#                     the rest is recorded for nothing. Set it to the guilds that have a
-#                     Discord channel.
-#        Example:     "1,4"
+#        Description: The guilds linked to Discord, comma-separated guild ids (guild.guildid).
+#                     Only these are recorded and get Discord messages; empty means none.
+#                     Each may be written "<guild id>=<channel id>", so the same string can
+#                     also be the bridge's GCB_CHANNELS.
+#        Example:     "1,4" or "1=111111111111111111,4=444444444444444444"
 #        Default:     ""
 
 GuildChatBridge.Guilds = ""
@@ -44,8 +44,8 @@ GuildChatBridge.KeepDays = 30
 
 #
 #    GuildChatBridge.LoginNotice
-#        Description: At login, tell members of a relayed guild that their guild chat is also
-#                     shown in Discord.
+#        Description: At login, tell members of a linked guild that their guild chat also goes
+#                     to Discord, and which name it shows (.chatname).
 #        Default:     1 - (On)
 #                     0 - (Off)
 

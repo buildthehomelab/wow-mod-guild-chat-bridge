@@ -1,7 +1,7 @@
 """Discord side of mod-guild-chat-bridge.
 
 Game -> Discord: posts the rows of guild_chat_bridge_message through a webhook in each guild's
-channel (named after the character, with its class icon), and edits or deletes the Discord
+channel (under the name the worldserver recorded, with the class icon), and edits or deletes the Discord
 message when the GuildChatEdit addon changes the row.
 
 Discord -> game: writes messages from those channels into guild_chat_bridge_inbound; the

@@ -98,11 +98,26 @@ run_file(INSTALL)
 run_file(INSTALL)  # re-runnable
 print("install applied twice: ok")
 
+# A table from before chosen names: the name column has to grow, the rows stay.
+q("DROP TABLE guild_chat_bridge_message")
+q("CREATE TABLE guild_chat_bridge_message (id BIGINT UNSIGNED PRIMARY KEY, sender_name VARCHAR(12) NOT NULL)")
+q("INSERT INTO guild_chat_bridge_message VALUES (1, 'Oldname')")
+run_file(INSTALL)
+assert q("SELECT CHARACTER_MAXIMUM_LENGTH n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+         "AND TABLE_NAME = 'guild_chat_bridge_message' AND COLUMN_NAME = 'sender_name'")[0]["n"] == 16
+assert q("SELECT sender_name FROM guild_chat_bridge_message WHERE id = 1")[0]["sender_name"] == "Oldname"
+q("DROP TABLE guild_chat_bridge_message")
+run_file(INSTALL)
+print("old table's sender_name widened: ok")
+
 (RECORD,) = statements("uint64 Record")
 (STORE,) = statements("void StoreChange")
 PRUNE = statements("void Prune")
 POLL, DELIVERED = statements("void Poll")
-print("statements from the C++:", 2 + len(PRUNE) + 2)
+(LOAD_NAMES,) = [m.group(1) for m in re.finditer(r'Query\("([^"]+)"', function_body("void LoadNames"))]
+(SAVE_NAME,) = statements("void SaveName")
+(DELETE_NAME,) = statements("void DeleteName")
+print("statements from the C++:", 2 + len(PRUNE) + 2 + 3)
 
 
 def record(id_, text, guild=1, guid=42, name="Pawster", cls=3):
@@ -178,6 +193,18 @@ assert row(7)["text"] == long
 change(7, 2, "x" * 255)
 assert row(7)["text"] == "x" * 255
 print("escaping, utf8mb4, 255 characters: ok")
+
+# Chosen names: as long as they get, in the message rows and across a restart.
+reset()
+record(8, "hi", name="A" * 16)
+assert row(8)["sender_name"] == "A" * 16
+q(fill(SAVE_NAME, 1, esc("Red Panda")))
+q(fill(SAVE_NAME, 2, esc("B" * 16)))
+q(fill(SAVE_NAME, 1, esc("Blue")))  # a rename replaces the row
+assert sorted((r["account_id"], r["display_name"]) for r in q(LOAD_NAMES)) == [(1, "Blue"), (2, "B" * 16)]
+q(fill(DELETE_NAME, 1))
+assert [r["account_id"] for r in q(LOAD_NAMES)] == [2]
+print("chosen names: ok")
 
 for p in PRUNE:
     q(fill(p, 30) if "{}" in p else p)
