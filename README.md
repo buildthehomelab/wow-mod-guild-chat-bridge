@@ -7,13 +7,15 @@ Guild chat for AzerothCore (3.3.5a) that you can fix after sending, and that rea
   line change to the new text, marked *(edited)*. `/gdelete` (or `/unsay`) removes the line.
   Members without the addon keep seeing what you first sent.
 - **Server module**: checks every edit (mute, rate, text, links) and blocks the ones it refuses,
-  so nobody sees them. For the guilds you link to Discord it also records real players' guild
-  chat and its edits (bots and ranks that may not speak are skipped), and shows messages from
-  Discord to the members who may listen to guild chat.
-- **Discord bridge** (`discord-bridge/`): a small container that posts each guild's chat to its
-  own Discord channel under each character's name and class icon, edits or deletes the Discord
-  message when the line is edited or deleted in game, and sends the channel's messages back to
-  that guild. All the channels can be in one Discord server.
+  so nobody sees them. For the guilds you list it also records real players' guild chat and its
+  edits (bots and ranks that may not speak are skipped), and shows messages from Discord to the
+  members who may listen to guild chat.
+- **Discord bridge** (`discord-bridge/`): one bot that posts each listed guild's chat to its own
+  Discord channel, edits or deletes the Discord message when the line is edited or deleted in
+  game, and sends what people write in the channel back to that guild.
+
+Nobody links a Discord account and nothing is sent by DM. Players only need the game; anyone in
+the channel can answer. No character sits in the guild either: the server itself listens.
 
 The addon works on its own; with the module the server judges edits, and with the bridge they
 reach Discord too.
@@ -70,6 +72,34 @@ show as guild chat instead, in the windows that show guild chat.
 Copy `addon/GuildChatEdit` into the client's `Interface/AddOns`, or hand it out with
 Portalkeeper (`sql/portalkeeper_addon.sql`).
 
+## Names in Discord
+
+Discord shows the player's character name, with the class icon, until they choose a name for
+all their characters:
+
+| Command | |
+| --- | --- |
+| `.chatname` | Shows the name Discord uses for you. |
+| `.chatname <name>` | Sets it for every character on your account. |
+| `.chatname clear` | Back to the character name. |
+
+A name is 2 to 16 characters: English letters, the digits 2 to 9, spaces, `-` and `_`, starting
+with a letter and holding at least two letters or digits. `0` and `1` are out because they pass for
+letters, and capitals are set as in character names (`aLIce` becomes `Alice`). A name can't match
+someone else's chosen name or a character on another account, ignoring case, spaces, `-` and `_`.
+Common staff and system names are refused (`Admin`, `Moderator`, `Bob GM`, anything with `discord`),
+as are names in the realm's `reserved_name` and `profanity_name` tables and, by the core's rule for
+those lists, any name ending in "gm".
+
+This stops the easy impersonation, not all of it: a name someone gives up is free for the next
+player, and a name can be chosen before a character of that name exists. A character whose name
+clashes with a chosen or reserved name shows in Discord as `Name*`. The module never reads login
+names, so one only shows if a player types their own. Messages already posted keep the name they
+had.
+
+To take a name away, delete the player's row from `guild_chat_bridge_name` and restart the
+worldserver.
+
 ## Install the module
 
 ```sh
@@ -79,16 +109,20 @@ git clone https://github.com/buildthehomelab/wow-mod-guild-chat-bridge.git mod-g
 
 Clone into `mod-guild-chat-bridge` (without `wow-`): AzerothCore derives the loader name from the
 folder. Re-run CMake, rebuild, copy `conf/mod_guild_chat_bridge.conf.dist` to
-`mod_guild_chat_bridge.conf` and set `GuildChatBridge.Enable = 1`. The tables are created by the
-database import (`data/sql/db-characters`).
+`mod_guild_chat_bridge.conf` and set `GuildChatBridge.Enable = 1`. The database import creates the
+tables (`data/sql/db-characters`) and the command's help text (`data/sql/db-world`).
+
+Upgrading from a version before chosen names: run the database import again so the changed characters
+file is re-applied; the worldserver stops at startup without the new table. `GuildChatBridge.Guilds`
+no longer treats an empty list as every guild, so list the guilds you link or none is relayed.
 
 | Setting | Default | |
 | --- | --- | --- |
 | `GuildChatBridge.Enable` | 0 | Record guild chat and show Discord messages. |
-| `GuildChatBridge.Guilds` | "" | Guild ids to relay, comma-separated. Empty = all; set it to the guilds that have a Discord channel. |
+| `GuildChatBridge.Guilds` | "" | The guilds linked to Discord, comma-separated ids (or `<guild id>=<channel id>`). Empty = none. |
 | `GuildChatBridge.PollInterval` | 1000 | ms between checks for Discord messages (async query). |
 | `GuildChatBridge.KeepDays` | 30 | Recorded chat older than this is deleted (at startup and hourly); 0 keeps it. |
-| `GuildChatBridge.LoginNotice` | 1 | Tell members of linked guilds at login that their guild chat is shown in Discord. |
+| `GuildChatBridge.LoginNotice` | 1 | Tell members of linked guilds at login that their guild chat goes to Discord, and how to set their name. |
 
 Guild ids are in `guild.guildid` of the characters database:
 
@@ -107,6 +141,7 @@ only turns recording and Discord on.
    Read Message History, Manage Webhooks); put your application id into
    `https://discord.com/oauth2/authorize?client_id=<application id>&scope=bot&permissions=536939520`.
 3. Make a text channel for each guild you want to link (one Discord server can hold them all).
+   It has to be a server channel: Discord doesn't allow bots or webhooks in group DMs.
    In Discord turn on **Developer Mode** (Settings, Advanced), right-click each channel and
    **Copy Channel ID**.
 4. Run the bridge next to the worldserver, on AzerothCore's Docker network:
@@ -132,7 +167,8 @@ only turns recording and Discord on.
         condition: service_healthy
 ```
 
-5. Set `GuildChatBridge.Guilds` to the same guild ids (`"1,4"` here).
+5. Set `GuildChatBridge.Guilds` to the same guilds. It takes the `GCB_CHANNELS` string as it is,
+   so one YAML anchor can define the links for both.
 
 Keep the token in your `.env`, never in a file you commit.
 
@@ -142,7 +178,7 @@ Each `<guild id>=<channel id>` pair links one guild to one channel. The bridge m
 webhook in each channel, posts that guild's chat there, and sends that channel's messages to
 that guild only. A channel can't serve two guilds: the bridge refuses to start and says which
 entries clash. To add a guild later, make its channel, add the pair to `GCB_CHANNELS` and the id
-to `GuildChatBridge.Guilds`, and restart both.
+to `GuildChatBridge.Guilds`, and restart both. A guild that isn't listed is never recorded.
 
 At start the bridge logs every link, for example:
 
@@ -160,7 +196,7 @@ growing delay and keeps posting for the others.
 | `GCB_DISCORD_TOKEN` | | The bot token. Without it the bridge starts and does nothing. |
 | `GCB_CHANNELS` | | `<guild id>=<channel id>` pairs. |
 | `GCB_DB_HOST` / `GCB_DB_PORT` | ac-database / 3306 | |
-| `GCB_DB_USER` / `GCB_DB_PASSWORD` | root / | Only needs SELECT, INSERT, UPDATE on the two `guild_chat_bridge_*` tables and SELECT on `guild` (for the names in the start-up log). |
+| `GCB_DB_USER` / `GCB_DB_PASSWORD` | root / | Only needs SELECT, UPDATE on `guild_chat_bridge_message`, INSERT on `guild_chat_bridge_inbound` and SELECT on `guild` (for the names in the start-up log). |
 | `GCB_DB_NAME` | acore_characters | |
 | `GCB_INTERVAL` | 1 | Seconds between checks for new guild chat. |
 | `GCB_BACKLOG_MINUTES` | 10 | Guild chat older than this when the bridge starts is not posted. |
@@ -184,7 +220,8 @@ recorded chat is kept for `GuildChatBridge.KeepDays` days.
   knows messages since its last restart, and only from the guild you're in now.
 - **Nothing reaches Discord.** Look at the bridge's start-up log: each `guild N -> #channel`
   line says whether the bot can see the channel and has its permissions. Check that
-  `GuildChatBridge.Enable = 1` and the guild id is in `GuildChatBridge.Guilds`.
+  `GuildChatBridge.Enable = 1` and the guild id is in `GuildChatBridge.Guilds`; an empty list
+  links no guild.
 - **"sync failed" over and over.** The bridge can't reach the database: is it on `ac-network`
   and is `GCB_DB_PASSWORD` right?
 - **Discord messages don't show in game.** Message Content Intent must be on for the bot, and
@@ -194,7 +231,8 @@ recorded chat is kept for `GuildChatBridge.KeepDays` days.
 ## Uninstall
 
 Remove the module folder, stop the bridge, rebuild, then run
-`data/sql/uninstall/mod_guild_chat_bridge_uninstall_characters.sql` on the characters database.
+`data/sql/uninstall/mod_guild_chat_bridge_uninstall_characters.sql` on the characters database and
+`data/sql/uninstall/mod_guild_chat_bridge_uninstall_world.sql` on the world database.
 Messages already in Discord stay there.
 
 ## Tests

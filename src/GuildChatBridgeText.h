@@ -24,6 +24,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace GuildChatBridge
 {
@@ -297,6 +300,181 @@ namespace GuildChatBridge
         std::optional<Open> _open;
         bool _changed = false;
         uint32_t _lastChangeMs = 0;
+    };
+
+    // GuildChatBridge.Guilds: guild ids, comma-separated. A token may be "<id>=<channel id>", so
+    // one string can define the links for this and the bridge's GCB_CHANNELS. Empty means no
+    // guild: only guilds someone listed are ever relayed. Tokens that aren't ids go to `bad`.
+    inline std::unordered_set<uint32_t> ParseGuildIds(std::string_view list, std::vector<std::string>& bad)
+    {
+        std::unordered_set<uint32_t> ids;
+        while (!list.empty())
+        {
+            std::size_t const comma = list.find(',');
+            std::string token(list.substr(0, comma));
+            list = comma == std::string_view::npos ? std::string_view() : list.substr(comma + 1);
+
+            std::string const full = token;
+            token = token.substr(0, token.find('='));
+            std::size_t const first = token.find_first_not_of(' ');
+            if (first == std::string::npos)
+            {
+                if (full.find_first_not_of(' ') != std::string::npos)
+                    bad.push_back(full);
+                continue;
+            }
+            token = token.substr(first, token.find_last_not_of(' ') - first + 1);
+            if (token.size() > 9 || token.find_first_not_of("0123456789") != std::string::npos)
+                bad.push_back(full);
+            else
+                ids.insert(uint32_t(std::stoul(token)));
+        }
+        return ids;
+    }
+
+    // A player's chosen Discord name: the same on all of an account's characters, and the login
+    // name never has to show. Plain ASCII, so two names can't look alike through other alphabets.
+    constexpr std::size_t MinChosenName = 2;
+    constexpr std::size_t MaxChosenName = 16;
+
+    enum class NameRefusal
+    {
+        None,
+        Length,
+        Characters,
+        Reserved
+    };
+
+    inline std::string LowerAscii(std::string_view text)
+    {
+        std::string out(text);
+        for (char& c : out)
+            if (c >= 'A' && c <= 'Z')
+                c = char(c - 'A' + 'a');
+        return out;
+    }
+
+    // What two names have to differ in: "Al-ice", "Al ice" and "ALICE" are all "alice".
+    inline std::string NameKey(std::string_view name)
+    {
+        std::string key;
+        for (char c : LowerAscii(name))
+            if (c != ' ' && c != '-' && c != '_')
+                key += c;
+        return key;
+    }
+
+    // Names a player could take for the staff or the system, or that Discord refuses for a webhook.
+    inline bool IsReservedChosenName(std::string_view name)
+    {
+        std::string const key = NameKey(name);
+        for (char const* part : { "admin", "blizzard", "clyde", "discord", "everyone", "gamemaster", "moderator" })
+            if (key.find(part) != std::string::npos)
+                return true;
+
+        std::string const lower = LowerAscii(name) + " ";
+        std::string word;
+        for (char c : lower)
+        {
+            if (c != ' ' && c != '-' && c != '_')
+            {
+                word += c;
+                continue;
+            }
+            for (char const* reserved : { "clear", "dev", "gm", "here", "mod", "server", "staff", "system" })
+                if (word == reserved || key == reserved)
+                    return true;
+            word.clear();
+        }
+        return false;
+    }
+
+    // Trims and collapses spaces into `out`; letters, digits, spaces, '-' and '_', starting with
+    // a letter. Letters can't be faked: no 0 or 1, which pass for o, i and l ("Adm1n"), and
+    // capitals as in character names, each word's first letter only ("aLIce" is "Alice").
+    inline NameRefusal NormalizeChosenName(std::string_view raw, std::string& out)
+    {
+        std::string const collapsed = CollapseSpaces(raw);
+        std::size_t const first = collapsed.find_first_not_of(' ');
+        if (first == std::string::npos)
+            return NameRefusal::Length;
+        out = collapsed.substr(first, collapsed.find_last_not_of(' ') - first + 1);
+
+        out = LowerAscii(out);
+        for (std::size_t i = 0; i < out.size(); ++i)
+        {
+            char const c = out[i];
+            bool const letter = c >= 'a' && c <= 'z';
+            bool const digit = c >= '2' && c <= '9';
+            if (!letter && (i == 0 || (!digit && c != ' ' && c != '-' && c != '_')))
+                return NameRefusal::Characters;
+            if (letter && (i == 0 || out[i - 1] == ' ' || out[i - 1] == '-' || out[i - 1] == '_'))
+                out[i] = char(c - 'a' + 'A');
+        }
+
+        if (out.size() < MinChosenName || out.size() > MaxChosenName || NameKey(out).size() < MinChosenName)
+            return NameRefusal::Length;
+        return IsReservedChosenName(out) ? NameRefusal::Reserved : NameRefusal::None;
+    }
+
+    // Chosen names by account. Only the world thread reads and writes it, so the name check and
+    // the claim can't race; the table is just where it is kept across restarts.
+    class NameBook
+    {
+    public:
+        static constexpr uint32_t ChangeInterval = 5000;  // ms between one account's changes
+
+        // A stored name at startup; false if another account already holds it.
+        bool Load(uint32_t account, std::string const& name)
+        {
+            if (IsTakenByOther(name, account))
+                return false;
+            Set(account, name);
+            return true;
+        }
+
+        std::string const* Get(uint32_t account) const
+        {
+            auto const it = _names.find(account);
+            return it == _names.end() ? nullptr : &it->second;
+        }
+
+        bool IsTakenByOther(std::string_view name, uint32_t account) const
+        {
+            auto const it = _owners.find(NameKey(name));
+            return it != _owners.end() && it->second != account;
+        }
+
+        void Set(uint32_t account, std::string const& name)
+        {
+            Clear(account);
+            _names[account] = name;
+            _owners[NameKey(name)] = account;
+        }
+
+        void Clear(uint32_t account)
+        {
+            auto const it = _names.find(account);
+            if (it == _names.end())
+                return;
+            _owners.erase(NameKey(it->second));
+            _names.erase(it);
+        }
+
+        // Whether this account changed its name too recently; if not, starts a new interval.
+        bool TooSoon(uint32_t account, uint32_t nowMs)
+        {
+            auto const it = _changed.find(account);
+            if (it != _changed.end() && nowMs - it->second < ChangeInterval)
+                return true;
+            _changed[account] = nowMs;
+            return false;
+        }
+
+    private:
+        std::unordered_map<uint32_t, std::string> _names;
+        std::unordered_map<std::string, uint32_t> _owners;
+        std::unordered_map<uint32_t, uint32_t> _changed;
     };
 
     // Text from Discord, made safe to show in the 3.3.5 client: '|' starts an escape sequence

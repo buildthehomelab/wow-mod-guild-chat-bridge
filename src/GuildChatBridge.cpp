@@ -7,6 +7,8 @@
  *                              bridge (discord-bridge/) posts and edits these.
  *   guild_chat_bridge_inbound  messages from the Discord channel. This module shows each one to
  *                              the guild's online players once.
+ *   guild_chat_bridge_name     the name a player chose for Discord with .chatname, per account.
+ *                              Without one, Discord shows the character name.
  *
  * It also judges the addon's edits in every guild, recorded or not: addon messages skip the
  * core's mute, flood, UTF-8 and link checks, so refused edits are blocked here before anyone
@@ -19,7 +21,9 @@
 
 #include "GuildChatBridgeText.h"
 
+#include "CharacterCache.h"
 #include "Chat.h"
+#include "ChatCommand.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
@@ -28,12 +32,12 @@
 #include "Hyperlinks.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "QueryCallback.h"
 #include "ScriptMgr.h"
 #include "StringFormat.h"
 #include "Timer.h"
-#include "Tokenize.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include <algorithm>
@@ -43,6 +47,8 @@
 #include <unordered_set>
 #include <utility>
 
+using namespace Acore::ChatCommands;
+
 namespace GuildChatBridge
 {
     namespace
@@ -50,7 +56,7 @@ namespace GuildChatBridge
         struct Config
         {
             bool enable = false;
-            std::unordered_set<uint32> guilds;  // empty = every guild
+            std::unordered_set<uint32_t> guilds;  // empty = no guild
             uint32 pollInterval = 1000;
             uint32 keepDays = 30;
             bool loginNotice = true;
@@ -80,6 +86,8 @@ namespace GuildChatBridge
         // Kept across logouts, so an edit after a relog still finds its message; entries older
         // than a day are pruned with the tables.
         std::unordered_map<ObjectGuid::LowType, EditGate> gates;
+
+        NameBook names;
 
         // Bots are sessions without a socket. AzerothCore marks them with
         // WorldSession::IsHeadless(); older playerbots core forks have WorldSession::IsBot()
@@ -116,7 +124,7 @@ namespace GuildChatBridge
 
         bool Relays(uint32 guildId)
         {
-            return config.enable && (config.guilds.empty() || config.guilds.count(guildId));
+            return config.enable && config.guilds.count(guildId);
         }
 
         uint64 Now()
@@ -130,6 +138,18 @@ namespace GuildChatBridge
             return text;
         }
 
+        // What Discord shows for this player: the name chosen for the account, else the character.
+        std::string DisplayName(Player* player)
+        {
+            uint32 const account = player->GetSession()->GetAccountId();
+            if (std::string const* chosen = names.Get(account))
+                return *chosen;
+            // A character created after someone else chose that name mustn't pass for them, and
+            // one named "System" mustn't pass for the system.
+            std::string const& name = player->GetName();
+            return names.IsTakenByOther(name, account) || IsReservedChosenName(name) ? name + "*" : name;
+        }
+
         void LoadConfig()
         {
             config.enable = sConfigMgr->GetOption<bool>("GuildChatBridge.Enable", false);
@@ -137,24 +157,43 @@ namespace GuildChatBridge
             config.keepDays = sConfigMgr->GetOption<uint32>("GuildChatBridge.KeepDays", 30);
             config.loginNotice = sConfigMgr->GetOption<bool>("GuildChatBridge.LoginNotice", true);
 
-            config.guilds.clear();
-            std::string const guilds = sConfigMgr->GetOption<std::string>("GuildChatBridge.Guilds", "");
-            for (std::string_view token : Acore::Tokenize(guilds, ',', false))
-            {
-                std::string id(token);
-                id.erase(0, id.find_first_not_of(' '));
-                id.erase(id.find_last_not_of(' ') + 1);
-                if (!id.empty() && id.find_first_not_of("0123456789") == std::string::npos && id.size() <= 9)
-                    config.guilds.insert(uint32(std::stoul(id)));
-                else
-                    LOG_ERROR("module", "mod-guild-chat-bridge: GuildChatBridge.Guilds has '{}', which is not a guild id", id);
-            }
+            std::vector<std::string> bad;
+            config.guilds = ParseGuildIds(sConfigMgr->GetOption<std::string>("GuildChatBridge.Guilds", ""), bad);
+            for (std::string const& token : bad)
+                LOG_ERROR("module", "mod-guild-chat-bridge: GuildChatBridge.Guilds has '{}', which is not a guild id", token);
+            if (config.enable && config.guilds.empty())
+                LOG_WARN("module", "mod-guild-chat-bridge: GuildChatBridge.Guilds is empty, so no guild goes to Discord");
         }
 
         void LoadNextMessageId()
         {
             if (QueryResult result = CharacterDatabase.Query("SELECT COALESCE(MAX(`id`), 0) FROM `guild_chat_bridge_message`"))
                 nextMessageId = std::max(nextMessageId, result->Fetch()[0].Get<uint64>());
+        }
+
+        void LoadNames()
+        {
+            QueryResult result = CharacterDatabase.Query("SELECT `account_id`, `display_name` FROM `guild_chat_bridge_name`");
+            if (!result)
+                return;
+            do
+            {
+                Field* fields = result->Fetch();
+                uint32 const account = fields[0].Get<uint32>();
+                std::string const name = fields[1].Get<std::string>();
+                if (!names.Load(account, name))
+                    LOG_ERROR("module", "mod-guild-chat-bridge: account {} and another both hold the name '{}'; ignoring it for this one", account, name);
+            } while (result->NextRow());
+        }
+
+        void SaveName(uint32 account, std::string const& name)
+        {
+            CharacterDatabase.Execute("REPLACE INTO `guild_chat_bridge_name` (`account_id`, `display_name`) VALUES ({}, '{}')", account, Escaped(name));
+        }
+
+        void DeleteName(uint32 account)
+        {
+            CharacterDatabase.Execute("DELETE FROM `guild_chat_bridge_name` WHERE `account_id` = {}", account);
         }
 
         void Prune()
@@ -184,7 +223,7 @@ namespace GuildChatBridge
             CharacterDatabase.Execute(
                 "INSERT INTO `guild_chat_bridge_message` (`id`, `guild_id`, `sender_guid`, `sender_name`, `sender_class`, `text`) "
                 "VALUES ({}, {}, {}, '{}', {}, '{}') ON DUPLICATE KEY UPDATE `id` = `id`",
-                id, guild->GetId(), player->GetGUID().GetCounter(), Escaped(player->GetName()), uint32(player->getClass()),
+                id, guild->GetId(), player->GetGUID().GetCounter(), Escaped(DisplayName(player)), uint32(player->getClass()),
                 Escaped(message));
             return id;
         }
@@ -206,7 +245,7 @@ namespace GuildChatBridge
                 "`edited_at` = IF({} > `rev`, NOW(), `edited_at`), "
                 "`pending` = 1, "
                 "`rev` = GREATEST(`rev`, {})",
-                last.id, last.guildId, player->GetGUID().GetCounter(), Escaped(player->GetName()), uint32(player->getClass()),
+                last.id, last.guildId, player->GetGUID().GetCounter(), Escaped(DisplayName(player)), uint32(player->getClass()),
                 escapedText, deletedFlag, rev,
                 rev, deletedFlag, escapedText,
                 rev, deletedFlag,
@@ -382,7 +421,117 @@ namespace GuildChatBridge
         {
             if (config.loginNotice && player->GetGuildId() && Relays(player->GetGuildId()) && IsRealPlayer(player))
                 ChatHandler(player->GetSession()).SendSysMessage(
-                    "|cff40ff40Guild chat:|r your guild's chat is also shown in its Discord channel, and messages from there appear here.");
+                    "|cff40ff40Guild chat:|r your guild's chat also goes to its Discord channel, and messages from there appear here. "
+                    "Discord shows your character name, or the name you set with .chatname <name>.");
+        }
+    };
+
+    class GuildChatBridgeCommandScript : public CommandScript
+    {
+    public:
+        GuildChatBridgeCommandScript() : CommandScript("GuildChatBridgeCommandScript") { }
+
+        ChatCommandTable GetCommands() const override
+        {
+            static ChatCommandTable commands =
+            {
+                { "chatname", HandleChatName, SEC_PLAYER, Console::No }
+            };
+            return commands;
+        }
+
+        // .chatname            shows the name
+        // .chatname <name>     sets it for every character of the account
+        // .chatname clear      goes back to the character name
+        static bool HandleChatName(ChatHandler* handler, Tail text)
+        {
+            Player* player = handler->GetPlayer();
+            if (!IsRealPlayer(player))
+                return true;
+
+            auto say = [handler](std::string const& message)
+            {
+                handler->SendSysMessage("|cff40ff40Guild chat:|r " + message);
+            };
+
+            if (!config.enable)
+            {
+                say("guild chat isn't linked to Discord on this realm.");
+                return true;
+            }
+
+            uint32 const account = player->GetSession()->GetAccountId();
+            std::string const wanted(text);
+            if (wanted.find_first_not_of(' ') == std::string::npos)
+            {
+                std::string const* chosen = names.Get(account);
+                say(chosen ? "Discord shows you as " + *chosen + ". Change it with .chatname <name>, or .chatname clear for your character name."
+                           : "Discord shows your character name. Choose one name for all your characters with .chatname <name>.");
+                return true;
+            }
+
+            std::string name;
+            NameRefusal const refusal = NormalizeChosenName(wanted, name);
+
+            // Checked ahead of the reserved names, which include this word.
+            if (LowerAscii(name) == "clear")
+            {
+                if (names.TooSoon(account, getMSTime()))
+                {
+                    say("wait a few seconds between name changes.");
+                    return true;
+                }
+                names.Clear(account);
+                DeleteName(account);
+                say("Discord will show your character name.");
+                return true;
+            }
+
+            switch (refusal)
+            {
+                case NameRefusal::Length:
+                    say("a name is " + std::to_string(MinChosenName) + " to " + std::to_string(MaxChosenName) + " characters, with at least two letters or digits.");
+                    return true;
+                case NameRefusal::Characters:
+                    say("a name starts with a letter and uses English letters, digits from 2 to 9, spaces, - and _.");
+                    return true;
+                case NameRefusal::Reserved:
+                    say("that name is reserved.");
+                    return true;
+                case NameRefusal::None:
+                    break;
+            }
+
+            // The lists the realm's admins keep for character names.
+            std::string const key = NameKey(name);
+            if (sObjectMgr->IsReservedName(name) || sObjectMgr->IsProfanityName(name)
+                || sObjectMgr->IsReservedName(key) || sObjectMgr->IsProfanityName(key))
+            {
+                say("that name is reserved.");
+                return true;
+            }
+
+            // Not another player's chosen name, and not a character on someone else's account.
+            std::string characterName = key;
+            ObjectGuid const character = normalizePlayerName(characterName) ? sCharacterCache->GetCharacterGuidByName(characterName) : ObjectGuid::Empty;
+            if (names.IsTakenByOther(name, account)
+                || (character && sCharacterCache->GetCharacterAccountIdByGuid(character) != account))
+            {
+                say("that name is taken.");
+                return true;
+            }
+
+            // The last check, so a typo or a taken name doesn't start the wait.
+            if (names.TooSoon(account, getMSTime()))
+            {
+                say("wait a few seconds between name changes.");
+                return true;
+            }
+
+            names.Set(account, name);
+            SaveName(account, name);
+            say("Discord will show you as " + name + " on all your characters. Messages already posted keep their old name.");
+            return true;
         }
     };
 
@@ -401,10 +550,11 @@ namespace GuildChatBridge
             LoadConfig();
         }
 
-        // One synchronous query at startup, before players are in.
+        // Synchronous queries at startup, before players are in.
         void OnStartup() override
         {
             LoadNextMessageId();
+            LoadNames();
             if (config.enable)
                 Prune();
         }
@@ -419,5 +569,6 @@ namespace GuildChatBridge
 void AddGuildChatBridgeScripts()
 {
     new GuildChatBridge::GuildChatBridgePlayerScript();
+    new GuildChatBridge::GuildChatBridgeCommandScript();
     new GuildChatBridge::GuildChatBridgeWorldScript();
 }

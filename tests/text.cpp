@@ -139,6 +139,75 @@ int main()
     assert(!IsValidEditText("surrogate \xed\xa0\x80"));
     assert(CollapseSpaces("ok    [Officer]:  give") == "ok [Officer]: give");
 
+    // The guild list: only listed guilds, in either form; empty is none.
+    {
+        std::vector<std::string> bad;
+        assert(ParseGuildIds("", bad).empty() && bad.empty());
+        assert(ParseGuildIds(" , ", bad).empty() && bad.empty());
+        auto ids = ParseGuildIds("1, 4 ,7=111111111111111111", bad);
+        assert(ids.size() == 3 && ids.count(1) && ids.count(4) && ids.count(7) && bad.empty());
+        ids = ParseGuildIds("1,x,-3,1x,12345678901", bad);
+        assert(ids.size() == 1 && ids.count(1) && bad.size() == 4);
+    }
+
+    // A link with no guild id is a mistake to report; blank tokens are not.
+    {
+        std::vector<std::string> bad;
+        assert(ParseGuildIds("=5, ,", bad).empty() && bad.size() == 1 && bad[0] == "=5");
+    }
+
+    // Chosen names.
+    {
+        std::string name;
+        assert(NormalizeChosenName("  Red   Panda ", name) == NameRefusal::None && name == "Red Panda");
+        assert(NormalizeChosenName("R2-d_2", name) == NameRefusal::None && name == "R2-D_2");
+        assert(NormalizeChosenName("aLIce", name) == NameRefusal::None && name == "Alice");
+        assert(NormalizeChosenName("red PANDA", name) == NameRefusal::None && name == "Red Panda");
+        assert(NormalizeChosenName("A-", name) == NameRefusal::Length);
+        for (char const* faked : { "Adm1n", "D1scord", "M0d Bob", "A1ice", "R0b" })
+            assert(NormalizeChosenName(faked, name) == NameRefusal::Characters);
+        assert(NormalizeChosenName("\xd0\xb0\xd0\xb1\xd0\xb2\xd0\xb3\xd0\xb4\xd0\xb5\xd0\xb6\xd0\xb7\xd0\xb8", name) == NameRefusal::Characters);
+        assert(NormalizeChosenName("   ", name) == NameRefusal::Length);
+        assert(NormalizeChosenName("R", name) == NameRefusal::Length);
+        assert(NormalizeChosenName(std::string(17, 'a'), name) == NameRefusal::Length);
+        assert(NormalizeChosenName(std::string(16, 'a'), name) == NameRefusal::None);
+        assert(NormalizeChosenName("2fast", name) == NameRefusal::Characters);
+        assert(NormalizeChosenName(" -xy", name) == NameRefusal::Characters);
+        assert(NormalizeChosenName("|cffff0000Red", name) == NameRefusal::Characters);
+        assert(NormalizeChosenName("caf\xc3\xa9", name) == NameRefusal::Characters);
+        assert(NormalizeChosenName("Everyone", name) == NameRefusal::Reserved);
+        assert(NormalizeChosenName("DISCORD", name) == NameRefusal::Reserved);
+        assert(NormalizeChosenName("clear", name) == NameRefusal::Reserved);
+        for (char const* staff : { "Game Master", "GameMaster", "Moderator", "Administrator", "Bob GM", "GM Bob", "G-M",
+                                   "Staff", "Server", "Blizzard", "System Message", "Sys-tem", "Discord Mod", "xDiscordx", "Dis cord", "Cl-yde", "Every One" })
+            assert(NormalizeChosenName(staff, name) == NameRefusal::Reserved);
+        for (char const* fine : { "Modest", "Ragmar", "Hereward", "Devin", "Red Panda" })
+            assert(NormalizeChosenName(fine, name) == NameRefusal::None);
+        assert(IsReservedChosenName("System") && IsReservedChosenName("Admin") && !IsReservedChosenName("Alice"));
+
+        NameBook book;
+        assert(!book.Get(1));
+        assert(book.Load(1, "Red"));
+        assert(!book.Load(2, "RED"));  // the same name in other letter case is taken
+        assert(*book.Get(1) == "Red" && !book.Get(2));
+        for (char const* lookalike : { "R-ed", "Re d", "r_e_d" })
+            assert(book.IsTakenByOther(lookalike, 2));
+        assert(book.Load(3, "Alice") && book.IsTakenByOther("Al-ice", 2) && book.IsTakenByOther("ALICE", 2));
+        assert(!book.IsTakenByOther("Kai", 2) && book.Load(5, "Kal") && !book.IsTakenByOther("Kai", 2));
+        assert(NameKey("A2-i_c e") == "a2ice");
+        assert(book.IsTakenByOther("red", 2) && !book.IsTakenByOther("red", 1) && !book.IsTakenByOther("blue", 2));
+        book.Set(1, "Blue");  // a rename frees the old name
+        assert(*book.Get(1) == "Blue" && !book.IsTakenByOther("Red", 2) && book.IsTakenByOther("BLUE", 2));
+        book.Clear(1);
+        assert(!book.Get(1) && !book.IsTakenByOther("Blue", 2));
+        book.Clear(1);
+
+        assert(!book.TooSoon(1, 1000));
+        assert(book.TooSoon(1, 1000 + NameBook::ChangeInterval - 1));
+        assert(!book.TooSoon(2, 1001));  // per account
+        assert(!book.TooSoon(1, 1000 + NameBook::ChangeInterval));
+    }
+
     // Discord text can't inject client escapes; control characters go, UTF-8 isn't split, a cut
     // line says so.
     assert(SanitizeForGame("|TInterface\\x:0|t hi", 255) == "||TInterface\\x:0||t hi");
@@ -150,5 +219,5 @@ int main()
     assert(FormatDiscordLine("Nori", "brb") == "|cff40ff40[Discord] Nori: brb|r");
     assert(FormatDiscordLine("x|cffff0000", "y").find("x||cffff0000") != std::string::npos);
 
-    std::puts("PASS: parsing, server vectors, recorded/unrecorded guilds, age, new message reset, edit text checks, Discord text sanitizing");
+    std::puts("PASS: parsing, server vectors, recorded/unrecorded guilds, age, new message reset, edit text checks, guild list, chosen names, Discord text sanitizing");
 }
